@@ -1,0 +1,190 @@
+version: '3.8'
+
+x-logging:
+  &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: 100M
+      max-file: "3"
+
+x-restart-policy:
+  &restart-policy
+  restart: unless-stopped
+
+services:
+  server:
+    image: judge0/judge0:latest
+    volumes:
+      - ./judge0.prod.conf:/judge0.conf:ro
+      - judge0_tmp:/tmp
+    ports:
+      - "2358:2358"
+    privileged: true
+    <<: *default-logging
+    <<: *restart-policy
+    environment:
+      - RAILS_ENV=production
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2358/system_info"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: judge0/judge0:latest
+    command: ["./scripts/workers"]
+    volumes:
+      - ./judge0.prod.conf:/judge0.conf:ro
+      - judge0_tmp:/tmp
+    privileged: true
+    <<: *default-logging
+    <<: *restart-policy
+    environment:
+      - RAILS_ENV=production
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+      replicas: 2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgres:16.2
+    env_file: judge0.prod.conf
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    <<: *default-logging
+    <<: *restart-policy
+    environment:
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judge0 -d judge0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+
+  redis:
+    image: redis:7.2.4-alpine
+    command: [
+      "redis-server",
+      "--appendonly", "yes",
+      "--requirepass", "${REDIS_PASSWORD}",
+      "--maxmemory", "512mb",
+      "--maxmemory-policy", "allkeys-lru"
+    ]
+    env_file: judge0.prod.conf
+    volumes:
+      - redis_data:/data
+    <<: *default-logging
+    <<: *restart-policy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
+  # Optional: Redis monitoring
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    ports:
+      - "9121:9121"
+    <<: *default-logging
+    <<: *restart-policy
+    depends_on:
+      - redis
+    profiles:
+      - monitoring
+
+  # Optional: PostgreSQL monitoring
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    environment:
+      - DATA_SOURCE_NAME=postgresql://judge0:${POSTGRES_PASSWORD}@db:5432/judge0?sslmode=disable
+    ports:
+      - "9187:9187"
+    <<: *default-logging
+    <<: *restart-policy
+    depends_on:
+      - db
+    profiles:
+      - monitoring
+
+  # Optional: System monitoring
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    <<: *default-logging
+    <<: *restart-policy
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  judge0_tmp:
+    driver: local
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 

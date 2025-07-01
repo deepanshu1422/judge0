@@ -1,0 +1,135 @@
+version: '3.8'
+
+x-logging:
+  &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: 50M
+      max-file: "2"
+
+x-restart-policy:
+  &restart-policy
+  restart: unless-stopped
+
+services:
+  server:
+    image: judge0/judge0:latest
+    volumes:
+      - ./judge0.minimal.conf:/judge0.conf:ro
+      - judge0_tmp:/tmp
+    ports:
+      - "2358:2358"
+    privileged: true
+    <<: *default-logging
+    <<: *restart-policy
+    environment:
+      - RAILS_ENV=production
+    deploy:
+      resources:
+        limits:
+          memory: 400M
+          cpus: '0.7'
+        reservations:
+          memory: 200M
+          cpus: '0.3'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2358/system_info"]
+      interval: 60s
+      timeout: 30s
+      retries: 2
+      start_period: 120s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: judge0/judge0:latest
+    command: ["./scripts/workers"]
+    volumes:
+      - ./judge0.minimal.conf:/judge0.conf:ro
+      - judge0_tmp:/tmp
+    privileged: true
+    <<: *default-logging
+    <<: *restart-policy
+    environment:
+      - RAILS_ENV=production
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+          cpus: '0.3'
+        reservations:
+          memory: 150M
+          cpus: '0.1'
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgres:16.2-alpine
+    env_file: judge0.minimal.conf
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+      - ./postgresql.minimal.conf:/etc/postgresql/postgresql.conf:ro
+    <<: *default-logging
+    <<: *restart-policy
+    environment:
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+          cpus: '0.2'
+        reservations:
+          memory: 100M
+          cpus: '0.1'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judge0 -d judge0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+
+  redis:
+    image: redis:7.2.4-alpine
+    command: [
+      "redis-server",
+      "--appendonly", "no",
+      "--requirepass", "${REDIS_PASSWORD}",
+      "--maxmemory", "50mb",
+      "--maxmemory-policy", "allkeys-lru",
+      "--save", ""
+    ]
+    env_file: judge0.minimal.conf
+    <<: *default-logging
+    <<: *restart-policy
+    deploy:
+      resources:
+        limits:
+          memory: 80M
+          cpus: '0.1'
+        reservations:
+          memory: 40M
+          cpus: '0.05'
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  postgres_data:
+    driver: local
+  judge0_tmp:
+    driver: local
+
+networks:
+  default:
+    driver: bridge 
